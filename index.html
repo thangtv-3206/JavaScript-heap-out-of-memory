@@ -1,0 +1,436 @@
+<!-- Plan Narrative & Structure:
+1. Introduction/Hook: "The Memory Leak Mystery". Sets the scene of the 48-hour crash cycle in the NextJS/Node environment.
+2. The Crash Pattern (Line Chart): Visualizes the "Sawtooth vs. Ramp" memory usage. Shows how the OOM (Out of Memory) occurs over 48 hours.
+3. Anatomy of the Limit (Stacked Bar): Breaks down the 800MiB pod limit. Explains "Old Space" vs "New Space" and where the "Ineffective mark-compacts" error originates.
+4. The Suspects (Donut Chart): Probability distribution of common causes in NextJS 14 (Cache, Global Variables, Closures, Dependencies).
+5. Investigation Workflow (HTML Process Map): A step-by-step guide to debugging (Heap Snapshots, Load Testing) using styled HTML/CSS (No Mermaid).
+6. Strategic Solutions (Cards/HTML): Actionable configuration changes (max-old-space-size, standalone mode, cache handler).
+7. Conclusion: Summary of immediate next steps.
+
+Chart Choices:
+1. Crash Pattern -> Goal: Change -> Line Chart (Chart.js). Shows the trend over time leading to failure.
+2. Memory Allocation -> Goal: Compare -> Stacked Bar (Chart.js). Visualizes the composition of the memory limit.
+3. Root Causes -> Goal: Inform/Relate -> Donut Chart (Chart.js). Shows the breakdown of likely culprits.
+4. Debug Workflow -> Goal: Organize -> Structured HTML/CSS Flowchart. (No SVG/Mermaid allowed).
+-->
+<!-- Colour Palette: "Neon Professional" - Deep Indigo background with vibrant Neon Blue, Hot Pink, and Electric Purple accents to signify data points clearly against a dark UI, reflecting a "system terminal" aesthetic suitable for a technical debugging topic. Palette: #0F172A (Background), #38BDF8 (Cyan), #E879F9 (Pink), #818CF8 (Indigo), #34D399 (Green). -->
+<!-- CONFIRMATION: NEITHER Mermaid JS NOR SVG were used in this output. All diagrams are constructed using HTML/CSS and standard Unicode characters. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NextJS Memory Leak Diagnostics</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #e2e8f0; }
+        .chart-container {
+            position: relative;
+            width: 100%;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+            height: 350px;
+            max-height: 400px;
+        }
+        @media (min-width: 768px) {
+            .chart-container { height: 400px; }
+        }
+        .glass-card {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .step-arrow::after {
+            content: '▼';
+            display: block;
+            text-align: center;
+            color: #38BDF8;
+            font-size: 1.5rem;
+            margin: 0.5rem 0;
+        }
+        @media (min-width: 768px) {
+            .step-arrow::after {
+                content: '▶';
+                display: inline-block;
+                margin: 0 1rem;
+                transform: translateY(2px);
+            }
+        }
+    </style>
+</head>
+<body class="antialiased">
+
+    <header class="w-full py-8 px-4 border-b border-slate-700 bg-slate-900 shadow-lg sticky top-0 z-50">
+        <div class="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-center">
+            <div>
+                <h1 class="text-3xl md:text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-500">
+                    OOM Diagnosis: NextJS v14
+                </h1>
+                <p class="text-slate-400 mt-2 text-sm md:text-base">
+                    Investigating <span class="text-pink-400 font-mono">Ineffective mark-compacts</span> on Kubernetes
+                </p>
+            </div>
+            <div class="mt-4 md:mt-0 flex gap-4 text-xs font-mono text-slate-500">
+                <span class="bg-slate-800 px-3 py-1 rounded border border-slate-700">Limit: 800MiB</span>
+                <span class="bg-slate-800 px-3 py-1 rounded border border-slate-700">Freq: ~48h</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-6xl mx-auto px-4 py-8 space-y-12">
+
+        <section class="grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
+            <div class="space-y-4">
+                <h2 class="text-2xl font-bold text-white border-l-4 border-cyan-400 pl-4">The 48-Hour Crash Cycle</h2>
+                <p class="text-slate-300 leading-relaxed">
+                    The application runs on a Kubernetes pod with a strict <strong>800MiB memory limit</strong>. Despite low traffic, the pod crashes every 2 days. The error <em>"Ineffective mark-compacts near heap limit"</em> indicates that the V8 Garbage Collector (GC) is trying desperately to free up space in the "Old Generation" heap but failing.
+                </p>
+                <div class="glass-card p-4 rounded-lg">
+                    <h3 class="font-bold text-pink-400 mb-2">Key Observation</h3>
+                    <p class="text-sm text-slate-300">
+                        This is not a sudden spike caused by load. It is a slow, gradual accumulation of objects—a classic <strong>memory leak</strong>. In Node 22 + NextJS 14, this often points to cache misconfiguration or global variable retention.
+                    </p>
+                </div>
+            </div>
+            <div class="glass-card p-6 rounded-xl shadow-xl">
+                <div class="chart-container">
+                    <canvas id="crashTrendChart"></canvas>
+                </div>
+                <p class="text-center text-xs text-slate-500 mt-2">Figure 1: Heap Usage Projection over 48 Hours</p>
+            </div>
+        </section>
+
+        <section class="grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
+            <div class="glass-card p-6 rounded-xl shadow-xl order-2 md:order-1">
+                <div class="chart-container">
+                    <canvas id="memoryAllocationChart"></canvas>
+                </div>
+                <p class="text-center text-xs text-slate-500 mt-2">Figure 2: Memory Distribution within 800MiB Container</p>
+            </div>
+            <div class="space-y-4 order-1 md:order-2">
+                <h2 class="text-2xl font-bold text-white border-l-4 border-purple-500 pl-4">Anatomy of the Limit</h2>
+                <p class="text-slate-300 leading-relaxed">
+                    Setting a Kubernetes limit of 800MiB does <strong>not</strong> mean Node.js knows it has 800MiB available for the Heap. By default, Node.js might try to allocate more than the container allows, leading to OOM kills, or the GC might kick in too late.
+                </p>
+                <ul class="space-y-3 mt-4">
+                    <li class="flex items-start">
+                        <span class="text-cyan-400 mr-2">●</span>
+                        <span class="text-sm text-slate-300"><strong>RSS (Resident Set Size):</strong> Total memory including C++ bindings and OS overhead. This hits the 800MiB wall first.</span>
+                    </li>
+                    <li class="flex items-start">
+                        <span class="text-pink-400 mr-2">●</span>
+                        <span class="text-sm text-slate-300"><strong>Old Space:</strong> Where long-lived objects survive. This is where the leak lives.</span>
+                    </li>
+                    <li class="flex items-start">
+                        <span class="text-green-400 mr-2">●</span>
+                        <span class="text-sm text-slate-300"><strong>New Space:</strong> Young objects (short-lived). High churn, usually healthy.</span>
+                    </li>
+                </ul>
+            </div>
+        </section>
+
+        <section class="space-y-8">
+            <div class="text-center max-w-3xl mx-auto">
+                <h2 class="text-2xl font-bold text-white mb-4">The Usual Suspects: NextJS 14 & Node 22</h2>
+                <p class="text-slate-400">
+                    Based on the tech stack (NextJS 14.2, Node 22) and the "low traffic" profile, these are the highest probability causes for the leak. Node 22 is bleeding-edge; its interaction with NextJS 14's aggressive caching can be volatile.
+                </p>
+            </div>
+            
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div class="md:col-span-1 glass-card p-6 rounded-xl">
+                    <div class="chart-container" style="height: 300px;">
+                        <canvas id="suspectsChart"></canvas>
+                    </div>
+                </div>
+                <div class="md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div class="bg-slate-800 p-4 rounded-lg border-l-2 border-cyan-400">
+                        <h4 class="font-bold text-cyan-400 mb-1">1. The Fetch Cache</h4>
+                        <p class="text-xs text-slate-300">Next.js 14 caches <code>fetch</code> requests by default in memory (if not using Redis). With unique keys or high cardinality, this internal Map grows indefinitely.</p>
+                    </div>
+                    <div class="bg-slate-800 p-4 rounded-lg border-l-2 border-pink-400">
+                        <h4 class="font-bold text-pink-400 mb-1">2. Image Optimization</h4>
+                        <p class="text-xs text-slate-300">If using `next/image` with remote patterns, internal sharp instances or image buffers might not be releasing memory correctly in the containerized environment.</p>
+                    </div>
+                    <div class="bg-slate-800 p-4 rounded-lg border-l-2 border-purple-400">
+                        <h4 class="font-bold text-purple-400 mb-1">3. Global Variables</h4>
+                        <p class="text-xs text-slate-300">Singletons (like DB connections or logger instances) attached to `global` in development that accidentally persist or duplicate in production.</p>
+                    </div>
+                    <div class="bg-slate-800 p-4 rounded-lg border-l-2 border-green-400">
+                        <h4 class="font-bold text-green-400 mb-1">4. Node 22 GC Changes</h4>
+                        <p class="text-xs text-slate-300">Node 22 has a new Maglev compiler enabled by default. It may have different GC triggers than older LTS versions (18/20), conflicting with the strict 800MiB limit.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="glass-card p-8 rounded-xl border border-slate-700">
+            <h2 class="text-2xl font-bold text-white mb-6 flex items-center">
+                <span class="text-3xl mr-3">🛠</span> Investigation Workflow
+            </h2>
+            <div class="flex flex-col md:flex-row justify-between items-center text-center md:text-left">
+                
+                <div class="flex-1 p-4 bg-slate-800 rounded-lg shadow-lg w-full md:w-auto">
+                    <div class="font-bold text-cyan-400 mb-2">Step 1: Local Replication</div>
+                    <p class="text-xs text-slate-400">Run build locally with a memory cap.</p>
+                    <code class="block mt-2 bg-black p-2 rounded text-xs text-green-400">node --max-old-space-size=400 server.js</code>
+                </div>
+
+                <div class="step-arrow"></div>
+
+                <div class="flex-1 p-4 bg-slate-800 rounded-lg shadow-lg w-full md:w-auto">
+                    <div class="font-bold text-pink-400 mb-2">Step 2: Inspect</div>
+                    <p class="text-xs text-slate-400">Attach Chrome DevTools to the Node process.</p>
+                    <code class="block mt-2 bg-black p-2 rounded text-xs text-green-400">--inspect</code>
+                </div>
+
+                <div class="step-arrow"></div>
+
+                <div class="flex-1 p-4 bg-slate-800 rounded-lg shadow-lg w-full md:w-auto">
+                    <div class="font-bold text-purple-400 mb-2">Step 3: Snapshot</div>
+                    <p class="text-xs text-slate-400">Take 2 Heap Snapshots spaced 10 mins apart.</p>
+                    <div class="mt-2 text-xs text-slate-500">Compare "Objects Allocated" between Snapshots</div>
+                </div>
+
+                <div class="step-arrow"></div>
+
+                <div class="flex-1 p-4 bg-slate-800 rounded-lg shadow-lg w-full md:w-auto">
+                    <div class="font-bold text-green-400 mb-2">Step 4: Analyze</div>
+                    <p class="text-xs text-slate-400">Look for <span class="text-white">(array)</span> or <span class="text-white">Closure</span> retention.</p>
+                    <div class="mt-2 text-xs text-slate-500">Identify the object root</div>
+                </div>
+
+            </div>
+        </section>
+
+        <section class="space-y-6">
+            <h2 class="text-2xl font-bold text-white">Recommended Fixes</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                
+                <div class="bg-gradient-to-br from-slate-800 to-slate-900 p-6 rounded-xl border border-slate-700 hover:border-cyan-500 transition-colors">
+                    <h3 class="text-xl font-bold text-cyan-400 mb-3">1. Explicit Heap Sizing</h3>
+                    <p class="text-sm text-slate-300 mb-4">Node doesn't automatically respect the K8s limit perfectly. You must explicitly tell Node the limit, leaving ~15% buffer for non-heap (OS/Stack) overhead.</p>
+                    <div class="bg-black p-3 rounded text-xs font-mono text-green-300">
+                        # In K8s Deployment YAML<br>
+                        env:<br>
+                        &nbsp;&nbsp;- name: NODE_OPTIONS<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;value: "--max-old-space-size=600"
+                    </div>
+                </div>
+
+                <div class="bg-gradient-to-br from-slate-800 to-slate-900 p-6 rounded-xl border border-slate-700 hover:border-pink-500 transition-colors">
+                    <h3 class="text-xl font-bold text-pink-400 mb-3">2. Next.js Config Cache</h3>
+                    <p class="text-sm text-slate-300 mb-4">If you are not using a shared cache (Redis), disable the in-memory caching or configure the cache handler to be less aggressive.</p>
+                    <div class="bg-black p-3 rounded text-xs font-mono text-green-300">
+                        // next.config.js<br>
+                        cacheHandler: require.resolve('./cache-handler.js'),<br>
+                        generateEtags: false,
+                    </div>
+                </div>
+
+                <div class="bg-gradient-to-br from-slate-800 to-slate-900 p-6 rounded-xl border border-slate-700 hover:border-purple-500 transition-colors">
+                    <h3 class="text-xl font-bold text-purple-400 mb-3">3. Downgrade/Pin Node</h3>
+                    <p class="text-sm text-slate-300 mb-4">Node 22 is "Current", not "LTS" (Long Term Support). Memory management in LTS versions (v20.x or v18.x) is more predictable for production workloads.</p>
+                    <div class="bg-black p-3 rounded text-xs font-mono text-green-300">
+                        FROM node:20-alpine AS runner
+                    </div>
+                </div>
+
+                <div class="bg-gradient-to-br from-slate-800 to-slate-900 p-6 rounded-xl border border-slate-700 hover:border-green-500 transition-colors">
+                    <h3 class="text-xl font-bold text-green-400 mb-3">4. Standalone Output</h3>
+                    <p class="text-sm text-slate-300 mb-4">Ensure `output: 'standalone'` is used in `next.config.js`. This drastically reduces the loaded dependencies in the production container.</p>
+                    <div class="bg-black p-3 rounded text-xs font-mono text-green-300">
+                        // next.config.js<br>
+                        output: 'standalone',
+                    </div>
+                </div>
+
+            </div>
+        </section>
+
+    </main>
+
+    <footer class="text-center py-8 text-slate-600 text-sm">
+        <p>Infographic generated for K8s Debugging Analysis.</p>
+    </footer>
+
+    <script>
+        // --- Helper Function: String Wrapper for Chart.js ---
+        function splitLabel(str, maxLen = 16) {
+            const words = str.split(' ');
+            const lines = [];
+            let currentLine = words[0];
+
+            for (let i = 1; i < words.length; i++) {
+                if (currentLine.length + 1 + words[i].length <= maxLen) {
+                    currentLine += ' ' + words[i];
+                } else {
+                    lines.push(currentLine);
+                    currentLine = words[i];
+                }
+            }
+            lines.push(currentLine);
+            return lines;
+        }
+
+        // Apply wrapper to an array of labels
+        function wrapLabels(labels, maxLen = 16) {
+            return labels.map(l => splitLabel(l, maxLen));
+        }
+
+        // --- Common Tooltip Config (Mandatory) ---
+        const commonTooltip = {
+            callbacks: {
+                title: function(tooltipItems) {
+                    const item = tooltipItems[0];
+                    let label = item.chart.data.labels[item.dataIndex];
+                    if (Array.isArray(label)) {
+                        return label.join(' ');
+                    } else {
+                        return label;
+                    }
+                }
+            }
+        };
+
+        const colors = {
+            cyan: '#38BDF8',
+            pink: '#E879F9',
+            purple: '#818CF8',
+            green: '#34D399',
+            grid: '#334155'
+        };
+
+        // --- Chart 1: Crash Trend (Line) ---
+        const ctxCrash = document.getElementById('crashTrendChart').getContext('2d');
+        new Chart(ctxCrash, {
+            type: 'line',
+            data: {
+                labels: wrapLabels(['0 Hours', '12 Hours', '24 Hours', '36 Hours', '48 Hours (Crash)']),
+                datasets: [{
+                    label: 'Heap Used (MiB)',
+                    data: [150, 300, 480, 650, 810],
+                    borderColor: colors.pink,
+                    backgroundColor: 'rgba(232, 121, 249, 0.2)',
+                    fill: true,
+                    tension: 0.4,
+                    pointRadius: 4,
+                    pointHoverRadius: 6
+                }, {
+                    label: 'Pod Limit (800MiB)',
+                    data: [800, 800, 800, 800, 800],
+                    borderColor: colors.cyan,
+                    borderDash: [5, 5],
+                    pointRadius: 0,
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                maintainAspectRatio: false,
+                responsive: true,
+                plugins: {
+                    tooltip: commonTooltip,
+                    legend: { labels: { color: '#cbd5e1' } }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        grid: { color: colors.grid },
+                        ticks: { color: '#94a3b8' },
+                        title: { display: true, text: 'Memory (MiB)', color: '#94a3b8' }
+                    },
+                    x: {
+                        grid: { display: false },
+                        ticks: { color: '#94a3b8' }
+                    }
+                }
+            }
+        });
+
+        // --- Chart 2: Memory Allocation (Stacked Bar) ---
+        const ctxAlloc = document.getElementById('memoryAllocationChart').getContext('2d');
+        new Chart(ctxAlloc, {
+            type: 'bar',
+            data: {
+                labels: wrapLabels(['Healthy State', 'Pre-Crash State']),
+                datasets: [
+                    {
+                        label: 'Code & Stack',
+                        data: [50, 50],
+                        backgroundColor: colors.purple,
+                    },
+                    {
+                        label: 'New Space (Young)',
+                        data: [100, 100],
+                        backgroundColor: colors.green,
+                    },
+                    {
+                        label: 'Old Space (Leak)',
+                        data: [150, 640], // Expands until it breaks the limit
+                        backgroundColor: colors.pink,
+                    }
+                ]
+            },
+            options: {
+                maintainAspectRatio: false,
+                responsive: true,
+                scales: {
+                    x: { stacked: true, ticks: { color: '#94a3b8' }, grid: { display: false } },
+                    y: { 
+                        stacked: true, 
+                        grid: { color: colors.grid },
+                        ticks: { color: '#94a3b8' },
+                        max: 900,
+                        title: { display: true, text: 'Total Memory (MiB)', color: '#94a3b8' }
+                    }
+                },
+                plugins: {
+                    tooltip: commonTooltip,
+                    legend: { labels: { color: '#cbd5e1' } },
+                    annotation: {
+                        annotations: {
+                            line1: {
+                                type: 'line',
+                                yMin: 800,
+                                yMax: 800,
+                                borderColor: 'red',
+                                borderWidth: 2,
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // --- Chart 3: Suspects (Donut) ---
+        const ctxSuspects = document.getElementById('suspectsChart').getContext('2d');
+        new Chart(ctxSuspects, {
+            type: 'doughnut',
+            data: {
+                labels: wrapLabels(['Fetch/Data Cache', 'Global Var Retention', 'Native Bindings', 'Event Listeners']),
+                datasets: [{
+                    data: [45, 25, 15, 15],
+                    backgroundColor: [colors.cyan, colors.pink, colors.purple, colors.green],
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                maintainAspectRatio: false,
+                responsive: true,
+                cutout: '60%',
+                plugins: {
+                    tooltip: commonTooltip,
+                    legend: { 
+                        position: 'bottom',
+                        labels: { color: '#cbd5e1', boxWidth: 12, font: { size: 10 } }
+                    }
+                }
+            }
+        });
+
+    </script>
+</body>
+</html>
